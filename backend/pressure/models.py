@@ -14,6 +14,12 @@ class DeviceStatus(models.Model):
         ("on", "ON"),
     ]
 
+    MQTT_STATUS_CHOICES = [
+        ("unknown", "Unknown"),
+        ("online", "Online"),
+        ("offline", "Offline"),
+    ]
+
     device_id = models.CharField(
         max_length=100,
         unique=True,
@@ -21,6 +27,7 @@ class DeviceStatus(models.Model):
     )
 
     opto_pin = models.IntegerField(null=True, blank=True)
+    relay_pin = models.IntegerField(null=True, blank=True)
 
     pressure_status = models.CharField(
         max_length=20,
@@ -34,10 +41,19 @@ class DeviceStatus(models.Model):
         default="unknown"
     )
 
-    last_message = models.TextField(blank=True, null=True)
+    mqtt_status = models.CharField(
+        max_length=20,
+        choices=MQTT_STATUS_CHOICES,
+        default="unknown"
+    )
 
-    # Important: this should update only when MQTT message comes from ESP32
+    last_message = models.TextField(blank=True, null=True)
     last_seen = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
-        return f"{self.device_id} - {self.pressure_status} - {self.device_state}"
+        return (
+            f"{self.device_id} - "
+            f"pressure={self.pressure_status} - "
+            f"device={self.device_state} - "
+            f"mqtt={self.mqtt_status}"
+        )

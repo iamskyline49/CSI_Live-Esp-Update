@@ -1,16 +1,16 @@
 import json
 
-from django.core.management.base import BaseCommand
 from django.conf import settings
+from django.core.management.base import BaseCommand
 from django.db import close_old_connections
 from django.utils import timezone
 
 from pressure.models import DeviceStatus
-from pressure.mqtt_client import create_mqtt_client, publish_server_ack
+from pressure.mqtt_client import create_mqtt_client
 
 
 class Command(BaseCommand):
-    help = "Start MQTT listener for real ESP32 pressure status and device response"
+    help = "Start MQTT listener for ESP32 pressure, relay response, and online/offline status"
 
     def handle(self, *args, **kwargs):
         self.stdout.write(
@@ -26,16 +26,23 @@ class Command(BaseCommand):
 
             client.subscribe(settings.MQTT_PRESSURE_TOPIC, qos=1)
             client.subscribe(settings.MQTT_RESPONSE_TOPIC, qos=1)
+            client.subscribe(settings.MQTT_STATUS_TOPIC, qos=1)
 
             self.stdout.write(
                 self.style.SUCCESS(
-                    f"Subscribed to pressure topic: {settings.MQTT_PRESSURE_TOPIC}"
+                    f"Subscribed pressure topic: {settings.MQTT_PRESSURE_TOPIC}"
                 )
             )
 
             self.stdout.write(
                 self.style.SUCCESS(
-                    f"Subscribed to response topic: {settings.MQTT_RESPONSE_TOPIC}"
+                    f"Subscribed response topic: {settings.MQTT_RESPONSE_TOPIC}"
+                )
+            )
+
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"Subscribed status topic: {settings.MQTT_STATUS_TOPIC}"
                 )
             )
 
@@ -43,7 +50,7 @@ class Command(BaseCommand):
             close_old_connections()
 
             topic = msg.topic
-            message = msg.payload.decode()
+            message = msg.payload.decode(errors="ignore")
 
             self.stdout.write(
                 f"MQTT Message Received: {topic} -> {message}"
@@ -54,6 +61,9 @@ class Command(BaseCommand):
 
             elif topic == settings.MQTT_RESPONSE_TOPIC:
                 self.handle_device_response(message)
+
+            elif topic == settings.MQTT_STATUS_TOPIC:
+                self.handle_status_message(message)
 
         client.on_connect = on_connect
         client.on_message = on_message
@@ -70,9 +80,13 @@ class Command(BaseCommand):
         try:
             data = json.loads(message)
 
-            device_id = data.get("device_id", "esp32-001")
+            device_id = data.get("device_id", settings.MQTT_DEVICE_ID)
+
             opto_pin = int(data.get("opto_pin", 0))
+            relay_pin = int(data.get("relay_pin", 0))
+
             pressure_status = data.get("pressure_status", "unknown")
+            device_state = data.get("device_state", "unknown")
 
             if opto_pin == 0:
                 pressure_status = "normal"
@@ -81,11 +95,21 @@ class Command(BaseCommand):
             else:
                 pressure_status = "unknown"
 
+            if relay_pin == 1:
+                device_state = "on"
+            elif relay_pin == 0:
+                device_state = "off"
+            else:
+                device_state = "unknown"
+
             DeviceStatus.objects.update_or_create(
                 device_id=device_id,
                 defaults={
                     "opto_pin": opto_pin,
+                    "relay_pin": relay_pin,
                     "pressure_status": pressure_status,
+                    "device_state": device_state,
+                    "mqtt_status": "online",
                     "last_message": message,
                     "last_seen": timezone.now(),
                 }
@@ -93,18 +117,8 @@ class Command(BaseCommand):
 
             self.stdout.write(
                 self.style.SUCCESS(
-                    f"Updated pressure: {pressure_status}, opto_pin={opto_pin}"
+                    f"Updated pressure={pressure_status}, device={device_state}"
                 )
-            )
-
-            publish_server_ack(
-                device_id=device_id,
-                received_type="pressure_status",
-                status="received"
-            )
-
-            self.stdout.write(
-                self.style.SUCCESS("ACK sent to ESP32 for pressure data")
             )
 
         except Exception as e:
@@ -116,38 +130,66 @@ class Command(BaseCommand):
         try:
             data = json.loads(message)
 
-            device_id = data.get("device_id", "esp32-001")
+            device_id = data.get("device_id", settings.MQTT_DEVICE_ID)
             device_state = data.get("device_state", "unknown")
 
-            if device_state not in ["on", "off"]:
+            if device_state == "on":
+                relay_pin = 1
+            elif device_state == "off":
+                relay_pin = 0
+            else:
+                relay_pin = None
                 device_state = "unknown"
+
+            defaults = {
+                "device_state": device_state,
+                "mqtt_status": "online",
+                "last_message": message,
+                "last_seen": timezone.now(),
+            }
+
+            if relay_pin is not None:
+                defaults["relay_pin"] = relay_pin
 
             DeviceStatus.objects.update_or_create(
                 device_id=device_id,
-                defaults={
-                    "device_state": device_state,
-                    "last_message": message,
-                    "last_seen": timezone.now(),
-                }
+                defaults=defaults
             )
 
             self.stdout.write(
                 self.style.SUCCESS(
-                    f"Updated relay device state: {device_state}"
+                    f"Updated device response: {device_state}"
                 )
-            )
-
-            publish_server_ack(
-                device_id=device_id,
-                received_type="relay_device_response",
-                status="received"
-            )
-
-            self.stdout.write(
-                self.style.SUCCESS("ACK sent to ESP32 for relay response")
             )
 
         except Exception as e:
             self.stdout.write(
                 self.style.ERROR(f"Device response error: {e}")
+            )
+
+    def handle_status_message(self, message):
+        try:
+            mqtt_status = message.strip().lower()
+
+            if mqtt_status not in ["online", "offline"]:
+                mqtt_status = "unknown"
+
+            device, created = DeviceStatus.objects.get_or_create(
+                device_id=settings.MQTT_DEVICE_ID
+            )
+
+            device.mqtt_status = mqtt_status
+            device.last_message = message
+            device.last_seen = timezone.now()
+            device.save()
+
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"Updated MQTT status: {mqtt_status}"
+                )
+            )
+
+        except Exception as e:
+            self.stdout.write(
+                self.style.ERROR(f"Status message error: {e}")
             )

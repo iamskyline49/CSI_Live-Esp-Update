@@ -1,12 +1,10 @@
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
 *.sqlite3
 db.sqlite3
 
-# Virtual environment
+# Virtual environments
 venv/
 env/
 .venv/
@@ -16,25 +14,20 @@ env/
 media/
 staticfiles/
 
-# Environment variables
+# Environment secrets
 .env
 .env.local
+.env.production
+.env.development
 
-# Node / React
+# React / Vite
 node_modules/
 dist/
 build/
 .vite/
 
-# IDE / Editor
-.vscode/
-.idea/
-
-# OS files
+# OS / Editor
 .DS_Store
 Thumbs.db
-
-# Arduino
-*.hex
-*.elf
-*.bin
+.vscode/
+.idea/
