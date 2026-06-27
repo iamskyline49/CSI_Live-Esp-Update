@@ -5,7 +5,7 @@ from django.core.management.base import BaseCommand
 from django.db import close_old_connections
 from django.utils import timezone
 
-from pressure.models import DeviceStatus
+from pressure.models import DeviceStatus, RelayActionLog
 from pressure.mqtt_client import create_mqtt_client
 
 
@@ -76,6 +76,55 @@ class Command(BaseCommand):
 
         client.loop_forever()
 
+    def confirm_pending_dashboard_action(self, device_state):
+        if device_state not in ["on", "off"]:
+            return False
+
+        pending_log = RelayActionLog.objects.filter(
+            device_id=settings.MQTT_DEVICE_ID,
+            action=device_state,
+            source=RelayActionLog.SOURCE_DASHBOARD,
+            status=RelayActionLog.STATUS_PENDING,
+        ).order_by("-requested_at").first()
+
+        if not pending_log:
+            return False
+
+        pending_log.status = RelayActionLog.STATUS_CONFIRMED
+        pending_log.confirmed_at = timezone.now()
+        pending_log.note = "ESP32 confirmed relay state from dashboard command."
+        pending_log.save()
+
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"Confirmed dashboard relay action: {device_state}"
+            )
+        )
+
+        return True
+
+    def create_physical_button_action(self, device_state):
+        if device_state not in ["on", "off"]:
+            return
+
+        RelayActionLog.objects.create(
+            device_id=settings.MQTT_DEVICE_ID,
+            action=device_state,
+            source=RelayActionLog.SOURCE_PHYSICAL_BUTTON,
+            status=RelayActionLog.STATUS_CONFIRMED,
+            actor_username="physical_button",
+            actor_full_name="Physical Button",
+            actor_role="Device",
+            confirmed_at=timezone.now(),
+            note="Relay changed using ESP32 physical/manual button.",
+        )
+
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"Created manual button relay action: {device_state}"
+            )
+        )
+
     def handle_pressure_message(self, message):
         try:
             data = json.loads(message)
@@ -115,6 +164,8 @@ class Command(BaseCommand):
                 }
             )
 
+            self.confirm_pending_dashboard_action(device_state)
+
             self.stdout.write(
                 self.style.SUCCESS(
                     f"Updated pressure={pressure_status}, device={device_state}"
@@ -132,6 +183,7 @@ class Command(BaseCommand):
 
             device_id = data.get("device_id", settings.MQTT_DEVICE_ID)
             device_state = data.get("device_state", "unknown")
+            source = data.get("source", "").strip().lower()
 
             if device_state == "on":
                 relay_pin = 1
@@ -156,9 +208,18 @@ class Command(BaseCommand):
                 defaults=defaults
             )
 
+            if source == "physical_button":
+                self.create_physical_button_action(device_state)
+
+            elif source == "dashboard_command":
+                self.confirm_pending_dashboard_action(device_state)
+
+            else:
+                self.confirm_pending_dashboard_action(device_state)
+
             self.stdout.write(
                 self.style.SUCCESS(
-                    f"Updated device response: {device_state}"
+                    f"Updated device response: {device_state}, source={source or 'unknown'}"
                 )
             )
 
